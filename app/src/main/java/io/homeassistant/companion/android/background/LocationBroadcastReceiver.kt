@@ -4,9 +4,7 @@ import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
 import android.location.Location
-import android.os.BatteryManager
 import android.os.Build
 import android.util.Log
 import com.google.android.gms.location.Geofence
@@ -19,7 +17,6 @@ import com.google.android.gms.location.LocationServices
 import io.homeassistant.companion.android.common.dagger.GraphComponentAccessor
 import io.homeassistant.companion.android.domain.integration.IntegrationUseCase
 import io.homeassistant.companion.android.domain.integration.UpdateLocation
-import io.homeassistant.companion.android.sensors.SensorWorker
 import io.homeassistant.companion.android.util.PermissionManager
 import javax.inject.Inject
 import kotlinx.coroutines.CoroutineScope
@@ -31,6 +28,8 @@ import kotlinx.coroutines.runBlocking
 class LocationBroadcastReceiver : BroadcastReceiver() {
 
     companion object {
+        const val MINIMUM_ACCURACY = 200
+
         const val ACTION_REQUEST_LOCATION_UPDATES =
             "io.homeassistant.companion.android.background.REQUEST_UPDATES"
         const val ACTION_REQUEST_ACCURATE_LOCATION_UPDATE =
@@ -41,8 +40,6 @@ class LocationBroadcastReceiver : BroadcastReceiver() {
             "io.homeassistant.companion.android.background.PROCESS_GEOFENCE"
 
         private const val TAG = "LocBroadcastReceiver"
-
-        private const val MINIMUM_ACCURACY = 200
     }
 
     @Inject
@@ -56,7 +53,7 @@ class LocationBroadcastReceiver : BroadcastReceiver() {
         when (intent.action) {
             Intent.ACTION_BOOT_COMPLETED,
             ACTION_REQUEST_LOCATION_UPDATES -> setupLocationTracking(context)
-            ACTION_PROCESS_LOCATION -> handleLocationUpdate(context, intent)
+            ACTION_PROCESS_LOCATION -> handleLocationUpdate(intent)
             ACTION_PROCESS_GEO -> handleGeoUpdate(context, intent)
             ACTION_REQUEST_ACCURATE_LOCATION_UPDATE -> requestSingleAccurateLocation(context)
             else -> Log.w(TAG, "Unknown intent action: ${intent.action}!")
@@ -134,13 +131,13 @@ class LocationBroadcastReceiver : BroadcastReceiver() {
         }
     }
 
-    private fun handleLocationUpdate(context: Context, intent: Intent) {
+    private fun handleLocationUpdate(intent: Intent) {
         Log.d(TAG, "Received location update.")
         LocationResult.extractResult(intent)?.lastLocation?.let {
             if (it.accuracy > MINIMUM_ACCURACY) {
                 Log.w(TAG, "Location accuracy didn't meet requirements, disregarding: $it")
             } else {
-                sendLocationUpdate(it, context)
+                sendLocationUpdate(it)
             }
         }
     }
@@ -157,15 +154,11 @@ class LocationBroadcastReceiver : BroadcastReceiver() {
             Log.w(TAG, "Geofence location accuracy didn't meet requirements, requesting new location.")
             requestSingleAccurateLocation(context)
         } else {
-            sendLocationUpdate(geofencingEvent.triggeringLocation, context)
+            sendLocationUpdate(geofencingEvent.triggeringLocation)
         }
     }
 
-    private fun sendLocationUpdate(location: Location, context: Context) {
-        // Anytime we send a location we should start the sensor worker.
-        // This is cause it to send sensors then restart the 15 minute interval.
-        SensorWorker.start(context)
-
+    private fun sendLocationUpdate(location: Location) {
         Log.d(
             TAG, "Last Location: " +
                     "\nCoords:(${location.latitude}, ${location.longitude})" +
@@ -176,7 +169,6 @@ class LocationBroadcastReceiver : BroadcastReceiver() {
             "",
             arrayOf(location.latitude, location.longitude),
             location.accuracy.toInt(),
-            getBatteryLevel(context),
             location.speed.toInt(),
             location.altitude.toInt(),
             location.bearing.toInt(),
@@ -244,11 +236,11 @@ class LocationBroadcastReceiver : BroadcastReceiver() {
                         Log.d(TAG, "Got single accurate location update: ${locationResult?.lastLocation}")
                         if (locationResult != null && locationResult.lastLocation.accuracy <= 1) {
                             Log.d(TAG, "Location accurate enough, all done with high accuracy.")
-                            runBlocking { sendLocationUpdate(locationResult.lastLocation, context) }
+                            runBlocking { sendLocationUpdate(locationResult.lastLocation) }
                             LocationServices.getFusedLocationProviderClient(context).removeLocationUpdates(this)
                         } else if (numberCalls >= maxRetries) {
                             Log.d(TAG, "No location was accurate enough, sending our last location anyway")
-                            runBlocking { sendLocationUpdate(locationResult!!.lastLocation, context) }
+                            runBlocking { sendLocationUpdate(locationResult!!.lastLocation) }
                         } else {
                             Log.w(TAG, "Location not accurate enough on retry $numberCalls of $maxRetries")
                         }
@@ -256,19 +248,5 @@ class LocationBroadcastReceiver : BroadcastReceiver() {
                 },
                 null
             )
-    }
-
-    private fun getBatteryLevel(context: Context): Int? {
-        val batteryIntent =
-            context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
-        val level = batteryIntent!!.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
-        val scale = batteryIntent.getIntExtra(BatteryManager.EXTRA_SCALE, -1)
-
-        if (level == -1 || scale == -1) {
-            Log.e(TAG, "Issue getting battery level!")
-            return null
-        }
-
-        return (level.toFloat() / scale.toFloat() * 100.0f).toInt()
     }
 }
